@@ -21,6 +21,7 @@ from core.clip_cutter import (
 from core.subtitle_renderer import add_subtitles as add_subtitles_impl
 from core.exceptions import ASRError
 from utils.path_security import sanitize_filename, get_safe_output_path
+from utils.timeline_visualizer import TimelineVisualizer
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,13 @@ class VideoProcessor:
         out_path = self.merge_video_clips()
         if not out_path:
             logger.error("合并成片未产生输出")
+            return
+
+        # 生成时间轴可视化对比图
+        try:
+            self._generate_timeline_visualization()
+        except Exception as e:
+            logger.warning("生成时间轴可视化图失败: %s", e)
 
     def process_single_video(self, filename: str) -> str | None:
         """处理单个视频：提取音频 -> OSS -> ASR -> 保存转录 JSON。返回转录文件路径或 None。"""
@@ -190,6 +198,32 @@ class VideoProcessor:
         if cleanup_cuts is None:
             cleanup_cuts = self.config.get("output", {}).get("cleanup_cuts", True)
         return merge_video_clips_impl(self.cuts_dir, out_dir, MERGED_VIDEO_FILENAME, cleanup_cuts=cleanup_cuts)
+
+    def _generate_timeline_visualization(self) -> None:
+        """
+        生成时间轴可视化对比图
+        """
+        if not self.video_paths:
+            return
+
+        # 获取第一个视频作为代表（多视频情况）
+        first_video = list(self.video_paths.values())[0]
+
+        visualizer = TimelineVisualizer(self.output_dir)
+        clip_order_path = os.path.join(self.output_dir, "clip_order.txt")
+
+        if not os.path.exists(clip_order_path):
+            logger.warning("找不到剪辑顺序文件，跳过时间轴可视化")
+            return
+
+        try:
+            html_path = visualizer.generate_html_timeline(
+                first_video,
+                clip_order_path
+            )
+            logger.info("✅ 时间轴对比图已生成: %s", html_path)
+        except Exception as e:
+            logger.warning("生成时间轴可视化图失败: %s", e)
 
     def cleanup_temp_files(self, keep_transcripts: bool = True) -> None:
         """

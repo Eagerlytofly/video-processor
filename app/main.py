@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--cut', action='store_true', help='根据重要对话裁剪视频')
     parser.add_argument('--merge', action='store_true', help='合并所有裁剪后的视频片段')
     parser.add_argument('--add-subtitles', action='store_true', help='为最新生成的视频添加字幕')
+    parser.add_argument('--timeline', action='store_true', help='生成时间轴可视化对比图')
     parser.add_argument('-o', '--output', type=str, default=None, help='输出目录，默认 data/output')
     parser.add_argument('files', nargs='*', help='要处理的视频文件路径（可多个），未指定时使用 data/input/mediasource 目录')
     args = parser.parse_args()
@@ -80,6 +81,48 @@ def main():
         print(f"为最新视频添加字幕: {latest_video}")
         processor = VideoProcessor(default_output)
         processor.add_subtitles(video_path, default_output)
+        return
+
+    if args.timeline:
+        if not os.path.exists(default_output):
+            print(f"输出目录不存在: {default_output}")
+            return
+        clip_order = os.path.join(default_output, "clip_order.txt")
+        if not os.path.exists(clip_order):
+            print(f"未找到 {clip_order}，请先运行完整处理流程")
+            return
+
+        # 解析所有涉及的视频
+        video_paths = {}
+        with open(clip_order, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    parts = line.split('\t')
+                    if parts:
+                        video_name = parts[0]
+                        if video_name not in video_paths:
+                            # 查找原始视频
+                            possible_paths = [
+                                os.path.join(current_dir, "data", "input", "mediasource", f"{video_name}.mp4"),
+                                os.path.join(current_dir, "data", "input", "mediasource", f"{video_name}.mov"),
+                                os.path.join(current_dir, "data", "input", "mediasource", video_name),
+                            ]
+                            for path in possible_paths:
+                                if os.path.exists(path):
+                                    video_paths[video_name] = path
+                                    break
+
+        if not video_paths:
+            print("未找到原始视频文件")
+            return
+
+        # 生成合并的时间轴报告（单HTML文件）
+        from utils.timeline_visualizer import generate_combined_timeline_report
+        result = generate_combined_timeline_report(video_paths, default_output)
+        if result:
+            print(f"✅ 合并时间轴对比图已生成: {result}")
+            print(f"   请用浏览器打开查看所有视频的时间轴对比")
         return
 
     # 默认：以「文件集合」为输入，进行转录→分析→裁剪→合并
