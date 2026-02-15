@@ -13,7 +13,7 @@ with open("app/requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="video-processor",
-    version="1.1.0",
+    version="1.1.1",
     author="Video Processor Team",
     description="智能视频内容分析和剪辑系统，支持语音识别、AI分析和自动剪辑",
     long_description=long_description,

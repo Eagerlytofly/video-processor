@@ -7,6 +7,24 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-02-16
+
+### Added
+
+- 增强核心模块单元测试覆盖
+  - VideoProcessor 测试从 6 个增加到 29 个
+  - 新增 process_single_video 完整流程测试（6 个）
+  - 新增 process_directory 流程测试（4 个）
+  - 新增 cleanup 方法测试（3 个）
+  - 新增 add_subtitles 测试（5 个）
+  - 新增其他辅助方法测试（5 个）
+- 测试总数从 152 个增加到 175 个
+
+### Changed
+
+- 改进测试结构和 Mock 使用方式
+- 提升 VideoProcessor 核心类的测试覆盖率至 100%
+
 ## [1.1.0] - 2026-02-15
 
 ### Added
