@@ -60,7 +60,22 @@ ALIYUN_APP_KEY=your-asr-app-key
 
 # DeepSeek AI
 DEEPSEEK_API_KEY=sk-your-deepseek-api-key
+
+# AI 分析提示词配置（可选）
+# 方式1: 从文件加载自定义提示词
+AI_SYSTEM_PROMPT_FILE=/path/to/your/prompt.txt
+# 方式2: 直接设置自定义提示词
+AI_SYSTEM_PROMPT="你的自定义系统提示词..."
 ```
+
+### 自定义 AI 分析提示词
+
+系统支持通过环境变量或文件自定义 AI 分析的系统提示词，优先级：
+1. `AI_SYSTEM_PROMPT_FILE` - 从指定文件读取
+2. `AI_SYSTEM_PROMPT` - 直接使用环境变量值
+3. 默认提示词 - 当上述都未配置时使用
+
+默认提示词已包含"去除重复片段"的指令。如果需要调整 AI 分析策略（如重点关注某些内容类型），可以创建自定义提示词文件。
 
 ## 使用方法
 

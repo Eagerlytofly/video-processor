@@ -7,6 +7,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- 可配置的 AI 系统提示词
+  - 支持通过 `AI_SYSTEM_PROMPT_FILE` 从文件加载自定义提示词
+  - 支持通过 `AI_SYSTEM_PROMPT` 环境变量直接设置
+  - 默认提示词已更新，包含去除重复片段的指令
+- 自动去重逻辑
+  - 检测时间重叠超过 80% 的重复片段
+  - 自动保留先出现的片段，提高剪辑质量
+
+### Changed
+
+- `app/core/ai_analyzer.py` - 添加提示词配置读取和去重逻辑
+- `app/config/config.py` - 添加 `AI_SYSTEM_PROMPT_FILE` 和 `AI_SYSTEM_PROMPT` 配置项
+- `.env.example` - 添加配置示例
+
 ## [1.1.1] - 2026-02-16
 
 ### Added

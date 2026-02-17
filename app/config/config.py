@@ -51,6 +51,11 @@ ASR_CONFIG = {
     "poll_interval": int(os.getenv("ASR_POLL_INTERVAL", "10")),  # 轮询间隔（秒）
 }
 
+# AI 分析提示词配置
+# 优先从文件读取，如果不存在则使用环境变量或默认值
+AI_SYSTEM_PROMPT_FILE = os.getenv("AI_SYSTEM_PROMPT_FILE", "")
+AI_SYSTEM_PROMPT = os.getenv("AI_SYSTEM_PROMPT", "")
+
 VIDEO_PROCESS_CONFIG = {
     "clip": {
         "max_gap": float(os.getenv("CLIP_MAX_GAP", "5.0")),
@@ -63,6 +68,8 @@ VIDEO_PROCESS_CONFIG = {
         "base_url": os.getenv("AI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         "timeout": int(os.getenv("AI_TIMEOUT", "120")),  # AI API 超时（秒）
         "fallback_on_error": os.getenv("AI_FALLBACK_ON_ERROR", "true").lower() == "true",  # 失败时降级
+        "system_prompt_file": AI_SYSTEM_PROMPT_FILE,
+        "system_prompt": AI_SYSTEM_PROMPT,
     },
     "output": {
         "transcript_file": os.getenv("OUTPUT_TRANSCRIPT_FILE", "merged_transcripts.txt"),

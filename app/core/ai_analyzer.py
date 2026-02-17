@@ -8,7 +8,7 @@ import logging
 import os
 import urllib.request
 
-from config.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL
+from config.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, VIDEO_PROCESS_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ MERGED_FILENAME = "merged_transcripts.txt"
 IMPORTANT_DIALOGUES_FILENAME = "important_dialogues.txt"
 CLIP_ORDER_FILENAME = "clip_order.txt"
 
-SYSTEM_PROMPT = """你是一个专业的转录文件分析剪辑师，擅长从音频或视频转录的文本中提取关键信息、整理内容并进行逻辑剪辑。你的任务包括但不限于：
+DEFAULT_SYSTEM_PROMPT = """你是一个专业的转录文件分析剪辑师，擅长从音频或视频转录的文本中提取关键信息、整理内容并进行逻辑剪辑。你的任务包括但不限于：
 
 文本分析：仔细阅读转录文本，理解上下文，识别重要信息、主题和关键点。
 内容剪辑：根据用户需求，对文本进行精简、重组或分段，确保逻辑清晰、重点突出。
@@ -28,7 +28,39 @@ SYSTEM_PROMPT = """你是一个专业的转录文件分析剪辑师，擅长从�
 [00:00:06.000 - 00:00:05.000] 你说他们的菜单跟北京菜单一一样，他们那的菜单跟北京一样一样。
 
 重要：你输出的每一行片段顺序即为最终成片的播放顺序。你可以根据重要性、逻辑或叙事需要自由排列片段——例如把后面视频中的某段放到最前面也可以。每个片段保持 ===文件名===（不含扩展名）与 [开始时间 - 结束时间] 的格式即可。
+
+请去除内容重复或高度相似的片段，只保留最有代表性的部分。
 """
+
+
+def _get_system_prompt() -> str:
+    """
+    获取系统提示词。优先级：
+    1. 配置文件指定的文件 (AI_SYSTEM_PROMPT_FILE)
+    2. 环境变量 (AI_SYSTEM_PROMPT)
+    3. 默认提示词
+    """
+    # 1. 尝试从文件读取
+    prompt_file = VIDEO_PROCESS_CONFIG.get("ai", {}).get("system_prompt_file", "")
+    if prompt_file and os.path.exists(prompt_file):
+        try:
+            with open(prompt_file, "r", encoding="utf-8") as f:
+                prompt = f.read().strip()
+            if prompt:
+                logger.info("已从文件加载系统提示词: %s", prompt_file)
+                return prompt
+        except Exception as e:
+            logger.warning("读取提示词文件失败: %s - %s", prompt_file, e)
+
+    # 2. 尝试从环境变量读取
+    env_prompt = VIDEO_PROCESS_CONFIG.get("ai", {}).get("system_prompt", "")
+    if env_prompt:
+        logger.info("已从环境变量加载系统提示词")
+        return env_prompt
+
+    # 3. 使用默认提示词
+    logger.debug("使用默认系统提示词")
+    return DEFAULT_SYSTEM_PROMPT
 
 
 def analyze_merged_transcripts(
@@ -72,10 +104,11 @@ def analyze_merged_transcripts(
 
     try:
         url = f"{DEEPSEEK_API_URL.rstrip('/')}/chat/completions"
+        system_prompt = _get_system_prompt()
         body = {
             "model": DEEPSEEK_MODEL,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.5,
@@ -177,13 +210,30 @@ def _create_fallback_clip_order(output_dir: str, transcript_content: str) -> Non
         logger.warning("降级模式：无法从转录内容解析剪辑顺序")
 
 
+def _time_to_seconds(time_str: str) -> float:
+    """将时间字符串转换为秒数"""
+    try:
+        parts = time_str.split(":")
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+        else:
+            return float(parts[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
 def _parse_analysis_to_clip_order(text: str) -> list:
     """
     从 AI 分析文本中解析出剪辑顺序列表。
     严格按文本中行出现的顺序输出，不重排、不按视频名排序，以保证与大模型返回顺序一致。
+    同时去除时间重叠的重复片段。
     """
     clip_order = []
     current_video = ""
+    seen_clips = set()  # 用于去重: (video, start_time, end_time)
+
     for line in text.split("\n"):
         line_stripped = line.strip()
         if not line_stripped:
@@ -198,12 +248,52 @@ def _parse_analysis_to_clip_order(text: str) -> list:
                 start_time, end_time = time_part.split(" - ", 1)
                 start_time = start_time.strip()
                 end_time = end_time.strip()
-                if start_time and end_time:
-                    clip_order.append({
-                        "video": current_video,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                    })
+
+                if not start_time or not end_time:
+                    continue
+
+                # 转换为秒数进行去重判断
+                start_sec = _time_to_seconds(start_time)
+                end_sec = _time_to_seconds(end_time)
+
+                if start_sec >= end_sec:
+                    logger.warning("无效时间段: %s - %s", start_time, end_time)
+                    continue
+
+                # 检查是否与已处理的片段时间重叠
+                is_duplicate = False
+                for seen_video, seen_start, seen_end in seen_clips:
+                    if seen_video != current_video:
+                        continue
+                    # 计算时间重叠
+                    overlap_start = max(start_sec, seen_start)
+                    overlap_end = min(end_sec, seen_end)
+                    if overlap_start < overlap_end:
+                        overlap_duration = overlap_end - overlap_start
+                        min_duration = min(end_sec - start_sec, seen_end - seen_start)
+                        # 如果重叠超过 80% 认为是重复
+                        if overlap_duration / min_duration > 0.8:
+                            is_duplicate = True
+                            logger.debug(
+                                "跳过重复片段: %s [%s - %s] (与 [%s - %s] 重叠 %.1f%%)",
+                                current_video, start_time, end_time,
+                                seen_start, seen_end, overlap_duration / min_duration * 100
+                            )
+                            break
+
+                if is_duplicate:
+                    continue
+
+                seen_clips.add((current_video, start_sec, end_sec))
+                clip_order.append({
+                    "video": current_video,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                })
             except Exception as e:
                 logger.error("解析时间戳失败: %s - %s", line_stripped, e)
+
+    if len(clip_order) < len(seen_clips) + sum(1 for line in text.split("\n") if line.strip().startswith("[")):
+        logger.info("去重完成: 移除了 %d 个重复片段", len(seen_clips) - len(clip_order))
+
     return clip_order
