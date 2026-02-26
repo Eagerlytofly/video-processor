@@ -7,8 +7,21 @@ import json
 import logging
 import os
 import urllib.request
+import urllib.error
 
-from config.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, VIDEO_PROCESS_CONFIG
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+
+from config.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, DEEPSEEK_MODEL, VIDEO_PROCESS_CONFIG, RETRY_CONFIG
+
+
+# 可重试的异常
+timeout_errors = (TimeoutError, urllib.error.URLError)
+server_errors = (urllib.error.HTTPError,)
+
+
+class AIAnalysisException(Exception):
+    """AI 分析异常，可重试"""
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +44,9 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的转录文件分析剪辑师，�
 
 请去除内容重复或高度相似的片段，只保留最有代表性的部分。
 """
+
+# 向后兼容：SYSTEM_PROMPT 是 DEFAULT_SYSTEM_PROMPT 的别名
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
 def _get_system_prompt() -> str:
@@ -103,29 +119,7 @@ def analyze_merged_transcripts(
     logger.info("用户提示: %s", user_prompt[:200])
 
     try:
-        url = f"{DEEPSEEK_API_URL.rstrip('/')}/chat/completions"
-        system_prompt = _get_system_prompt()
-        body = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.5,
-            "stream": False,
-        }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            completion = json.loads(resp.read().decode())
-        analysis_result = completion["choices"][0]["message"]["content"]
+        analysis_result = _call_ai_api(user_prompt)
     except Exception as e:
         logger.error("AI 分析失败: %s", e)
         if fallback_to_transcription_only:
@@ -222,6 +216,58 @@ def _time_to_seconds(time_str: str) -> float:
             return float(parts[0])
     except (ValueError, IndexError):
         return 0.0
+
+
+@retry(
+    stop=stop_after_attempt(RETRY_CONFIG["max_attempts"]),
+    wait=wait_exponential(multiplier=1, min=RETRY_CONFIG["min_wait"], max=RETRY_CONFIG["max_wait"]),
+    retry=retry_if_exception_type((timeout_errors + server_errors + (AIAnalysisException,))),
+    before_sleep=lambda retry_state: logger.warning(
+        "AI API 调用失败，%d 秒后重试 (第 %d/%d 次): %s",
+        retry_state.next_action.sleep, retry_state.attempt_number, RETRY_CONFIG["max_attempts"],
+        retry_state.outcome.exception()
+    ),
+)
+def _call_ai_api(user_prompt: str) -> str:
+    """
+    调用 AI API 进行内容分析，带有重试机制。
+    重试条件：网络超时、服务器错误（5xx）、连接错误
+    """
+    url = f"{DEEPSEEK_API_URL.rstrip('/')}/chat/completions"
+    system_prompt = _get_system_prompt()
+    body = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.5,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            completion = json.loads(resp.read().decode())
+        return completion["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        # 5xx 错误可重试，4xx 错误不重试
+        if e.code >= 500:
+            logger.warning("AI API 服务器错误 (HTTP %d)，将重试", e.code)
+            raise AIAnalysisException(f"AI API 服务器错误: {e.code}") from e
+        else:
+            logger.error("AI API 客户端错误 (HTTP %d)，不重试", e.code)
+            raise
+    except (urllib.error.URLError, TimeoutError) as e:
+        logger.warning("AI API 网络错误，将重试: %s", e)
+        raise AIAnalysisException(f"AI API 网络错误: {e}") from e
 
 
 def _parse_analysis_to_clip_order(text: str) -> list:

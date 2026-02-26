@@ -51,6 +51,20 @@ ASR_CONFIG = {
     "poll_interval": int(os.getenv("ASR_POLL_INTERVAL", "10")),  # 轮询间隔（秒）
 }
 
+# 重试配置
+RETRY_CONFIG = {
+    "max_attempts": int(os.getenv("RETRY_MAX_ATTEMPTS", "3")),  # 最大重试次数
+    "min_wait": int(os.getenv("RETRY_MIN_WAIT", "4")),  # 最小等待时间（秒）
+    "max_wait": int(os.getenv("RETRY_MAX_WAIT", "10")),  # 最大等待时间（秒）
+}
+
+# 持久化存储配置
+PERSISTENCE_CONFIG = {
+    "enabled": os.getenv("PERSISTENCE_ENABLED", "true").lower() == "true",
+    "db_path": os.getenv("PERSISTENCE_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "tasks.db")),
+    "auto_cleanup_days": int(os.getenv("PERSISTENCE_AUTO_CLEANUP_DAYS", "7")),  # 自动清理已完成任务的天数
+}
+
 # AI 分析提示词配置
 # 优先从文件读取，如果不存在则使用环境变量或默认值
 AI_SYSTEM_PROMPT_FILE = os.getenv("AI_SYSTEM_PROMPT_FILE", "")

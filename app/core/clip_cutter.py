@@ -305,6 +305,8 @@ def process_clips(
                 logger.warning("ffmpeg 裁剪失败，尝试 MoviePy: %s", video_path)
 
         if not ok:
+            video = None
+            sub = None
             try:
                 video = VideoFileClip(video_path)
                 dur = video.duration
@@ -317,9 +319,22 @@ def process_clips(
                 sub = video.subclipped(start_sec, end_sec)
                 sub.write_videofile(out_path)
                 sub.close()
+                sub = None
                 video.close()
+                video = None
                 ok = True
             except Exception as e:
+                # 确保资源清理
+                if sub:
+                    try:
+                        sub.close()
+                    except Exception:
+                        pass
+                if video:
+                    try:
+                        video.close()
+                    except Exception:
+                        pass
                 if not use_ffmpeg_first:
                     logger.warning("MoviePy 裁剪失败，尝试 ffmpeg: %s", e)
                     ok = _cut_segment_ffmpeg(video_path, start_sec, end_sec, out_path)
@@ -342,6 +357,8 @@ def merge_video_clips(
     将 cuts_dir 下 clip_1.mp4, clip_2.mp4, ... 按序合并，
     输出到 output_dir/output_filename。返回输出文件路径。
 
+    优先使用 ffmpeg concat 避免将所有片段加载到内存，提高大文件处理能力。
+
     Args:
         cleanup_cuts: 合并成功后是否清理 cuts_dir 中的中间片段
     """
@@ -358,37 +375,57 @@ def merge_video_clips(
 
     logger.info("合并 %d 个片段", len(files))
     out_path = os.path.join(output_dir, output_filename)
+
+    # 计算总文件大小，判断是否需要使用低内存模式
+    total_size_mb = sum(_get_file_size_mb(f) or 0 for f in files)
+    use_ffmpeg_first = total_size_mb > 500 or len(files) > 20  # 大文件或多片段时使用 ffmpeg
+
+    if use_ffmpeg_first:
+        logger.info("使用 ffmpeg concat 合并 (总大小: %.1f MB, %d 个片段)", total_size_mb, len(files))
+    else:
+        logger.info("尝试使用 MoviePy 合并，失败则回退到 ffmpeg")
+
+    clips = []  # 用于 MoviePy 模式
+    list_path = None
+
     try:
-        clips = []
-        for p in files:
-            clips.append(VideoFileClip(p))
-        final = concatenate_videoclips(clips)
-        final.write_videofile(out_path, codec="libx264", audio_codec="aac", audio=True)
-        final.close()
-        for c in clips:
-            c.close()
-        logger.info("合并完成: %s", out_path)
-
-        # 清理中间片段
-        if cleanup_cuts:
-            _cleanup_cuts_dir(cuts_dir)
-
-        return out_path
-    except Exception as e:
-        logger.warning("MoviePy 合并失败，尝试 ffmpeg concat: %s", e)
-        for c in clips:
+        # 如果片段较少且总大小不大，尝试 MoviePy 合并
+        if not use_ffmpeg_first:
             try:
-                c.close()
-            except Exception:
-                pass
-    # ffmpeg concat 回退（兼容 HEVC/MOV 等 MoviePy 解析失败的情况）
-    list_path = os.path.join(output_dir, ".concat_list.txt")
-    with open(list_path, "w") as f:
-        for p in files:
-            # 路径中单引号转义为 '\''
-            abs_p = os.path.abspath(p).replace("'", "'\\''")
-            f.write(f"file '{abs_p}'\n")
-    try:
+                for p in files:
+                    clip = VideoFileClip(p)
+                    clips.append(clip)
+                final = concatenate_videoclips(clips)
+                final.write_videofile(out_path, codec="libx264", audio_codec="aac", audio=True)
+                final.close()
+                for c in clips:
+                    c.close()
+                clips.clear()
+                logger.info("MoviePy 合并完成: %s", out_path)
+
+                # 清理中间片段
+                if cleanup_cuts:
+                    _cleanup_cuts_dir(cuts_dir)
+
+                return out_path
+            except Exception as e:
+                logger.warning("MoviePy 合并失败，回退到 ffmpeg concat: %s", e)
+                # 清理已加载的 clips
+                for c in clips:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                clips.clear()
+
+        # ffmpeg concat 方式（低内存占用）
+        list_path = os.path.join(output_dir, ".concat_list.txt")
+        with open(list_path, "w") as f:
+            for p in files:
+                # 路径中单引号转义为 '\''
+                abs_p = os.path.abspath(p).replace("'", "'\\''")
+                f.write(f"file '{abs_p}'\n")
+
         subprocess.run(
             [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
@@ -399,20 +436,29 @@ def merge_video_clips(
             check=True,
             capture_output=True,
         )
-        try:
-            os.remove(list_path)
-        except OSError:
-            pass
-        logger.info("合并完成(ffmpeg): %s", out_path)
+        logger.info("ffmpeg concat 合并完成: %s", out_path)
 
         # 清理中间片段
         if cleanup_cuts:
             _cleanup_cuts_dir(cuts_dir)
 
         return out_path
+
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logger.error("合并视频失败: %s", e)
         raise
+    finally:
+        # 确保资源清理
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if list_path and os.path.exists(list_path):
+            try:
+                os.remove(list_path)
+            except OSError:
+                pass
 
 
 def _cleanup_cuts_dir(cuts_dir: str) -> None:

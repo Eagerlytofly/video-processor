@@ -51,13 +51,20 @@ async def main():
     """主函数"""
     logger.info(f"项目根目录: {BASE_DIR}")
     logger.info(f"启动WebSocket服务器...")
-    
+
     # 确保必要的目录存在
     os.makedirs(os.path.join(BASE_DIR, 'public', 'videos'), exist_ok=True)
     os.makedirs(os.path.join(BASE_DIR, 'output'), exist_ok=True)
-    
-    async with websockets.serve(handle_websocket, "0.0.0.0", 8000):
-        await asyncio.Future()
+
+    # 启动清理调度器
+    await task_manager.start_cleanup_scheduler()
+
+    try:
+        async with websockets.serve(handle_websocket, "0.0.0.0", 8000):
+            await asyncio.Future()
+    finally:
+        # 停止清理调度器
+        await task_manager.stop_cleanup_scheduler()
 
 def start_server():
     """启动WebSocket服务器"""

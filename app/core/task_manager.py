@@ -7,6 +7,7 @@ from typing import Dict, Optional
 import json
 from pathlib import Path
 from core.video_processor import VideoProcessor
+from core.persistence import TaskPersistence
 from config.config import TASK_MANAGER_CONFIG
 
 # 获取项目根目录
@@ -15,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 
 class TaskManager:
-    def __init__(self, max_concurrent_tasks=3, task_timeout=600):
+    def __init__(self, max_concurrent_tasks=3, task_timeout=600, persistence: Optional[TaskPersistence] = None):
         self.tasks: Dict[str, Dict] = {}
         self.video_processors: Dict[str, 'VideoProcessor'] = {}
         self.max_concurrent_tasks = max_concurrent_tasks
@@ -23,15 +24,17 @@ class TaskManager:
         self.processing_tasks = 0
         self.task_queue = asyncio.Queue()
         self._cancelled_tasks: set = set()  # 被取消的任务ID集合
+        self.persistence = persistence
+        self._cleanup_task: Optional[asyncio.Task] = None
         
     async def add_task(self, task_id: str, websocket, data: dict) -> None:
         """添加新任务到队列"""
         logger.info(f"添加新任务: {task_id}")
-        
+
         # 创建任务专属目录
         task_output_dir = os.path.join(BASE_DIR, "output", task_id)
         os.makedirs(task_output_dir, exist_ok=True)
-        
+
         # 保存任务信息
         self.tasks[task_id] = {
             'status': 'pending',
@@ -40,7 +43,16 @@ class TaskManager:
             'created_at': datetime.now(),
             'output_dir': task_output_dir
         }
-        
+
+        # 持久化任务
+        if self.persistence:
+            await self.persistence.save_task(
+                task_id=task_id,
+                status='pending',
+                data=data,
+                output_dir=task_output_dir
+            )
+
         # 将任务加入队列
         await self.task_queue.put(task_id)
         # 尝试处理任务
@@ -71,6 +83,8 @@ class TaskManager:
         try:
             # 更新任务状态
             task['status'] = 'processing'
+            if self.persistence:
+                await self.persistence.save_task(task_id, 'processing')
 
             # 使用 wait_for 包装整个处理流程，添加超时控制
             await asyncio.wait_for(
@@ -82,11 +96,15 @@ class TaskManager:
             if task_id not in self._cancelled_tasks:
                 task['status'] = 'completed'
                 task['completed_at'] = datetime.now()
+                if self.persistence:
+                    await self.persistence.save_task(task_id, 'completed')
 
         except asyncio.TimeoutError:
             logger.error(f"任务 {task_id} 处理超时（{self.task_timeout}秒）")
             task['status'] = 'timeout'
             task['error'] = f'处理超时，超过{self.task_timeout}秒'
+            if self.persistence:
+                await self.persistence.save_task(task_id, 'timeout', error=task['error'])
             try:
                 await self.send_websocket_message(
                     websocket, "error", task_id,
@@ -99,6 +117,8 @@ class TaskManager:
             logger.info(f"任务 {task_id} 被取消")
             task['status'] = 'cancelled'
             self._cancelled_tasks.discard(task_id)
+            if self.persistence:
+                await self.persistence.save_task(task_id, 'cancelled')
             try:
                 await self.send_websocket_message(
                     websocket, "cancelled", task_id, "任务已取消"
@@ -111,6 +131,8 @@ class TaskManager:
             logger.error("任务处理失败: %s", e, exc_info=True)
             task['status'] = 'error'
             task['error'] = str(e)
+            if self.persistence:
+                await self.persistence.save_task(task_id, 'error', error=str(e))
             try:
                 await self.send_websocket_message(
                     websocket, "error", task_id, f"任务失败: {str(e)}"
@@ -275,6 +297,8 @@ class TaskManager:
             # 队列中的任务直接标记为取消
             task['status'] = 'cancelled'
             logger.info(f"队列中的任务 {task_id} 已取消")
+            if self.persistence:
+                await self.persistence.save_task(task_id, 'cancelled')
             return True
 
         # processing 状态的任务会由 process_task 检查并处理
@@ -295,8 +319,58 @@ class TaskManager:
         }
         await websocket.send(json.dumps(message_data))
 
+    async def start_cleanup_scheduler(self, interval_hours: int = 24):
+        """启动定期清理任务调度器"""
+        if not self.persistence or not self.persistence.enabled:
+            logger.info("持久化未启用，跳过清理调度器")
+            return
+
+        async def cleanup_loop():
+            while True:
+                try:
+                    await asyncio.sleep(interval_hours * 3600)  # 转换为秒
+                    deleted = await self.persistence.cleanup_old_tasks()
+                    if deleted > 0:
+                        logger.info("定期清理完成，删除了 %d 个旧任务", deleted)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("定期清理任务失败: %s", e)
+
+        self._cleanup_task = asyncio.create_task(cleanup_loop())
+        logger.info("清理调度器已启动，间隔: %d 小时", interval_hours)
+
+    async def stop_cleanup_scheduler(self):
+        """停止清理调度器"""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("清理调度器已停止")
+
+    async def get_task_stats(self) -> dict:
+        """获取任务统计信息"""
+        stats = {
+            "total": len(self.tasks),
+            "pending": 0,
+            "processing": 0,
+            "completed": 0,
+            "error": 0,
+            "timeout": 0,
+            "cancelled": 0
+        }
+        for task in self.tasks.values():
+            status = task.get('status', 'unknown')
+            if status in stats:
+                stats[status] += 1
+        return stats
+
 # 创建全局任务管理器实例（使用配置）
+from core.persistence import task_persistence
 task_manager = TaskManager(
     max_concurrent_tasks=TASK_MANAGER_CONFIG["max_concurrent_tasks"],
-    task_timeout=TASK_MANAGER_CONFIG["task_timeout"]
+    task_timeout=TASK_MANAGER_CONFIG["task_timeout"],
+    persistence=task_persistence
 )

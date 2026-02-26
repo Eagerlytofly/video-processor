@@ -404,13 +404,18 @@ def test_submit_task_api_exception(asr_client_with_mock):
 
 
 def test_get_result_api_exception(asr_client_with_mock):
-    """测试 get_result API 抛出异常。"""
+    """测试 get_result API 抛出异常时，重试后最终失败。"""
     client = asr_client_with_mock
 
     client._acs.do_action_with_exception.side_effect = Exception("Connection timeout")
 
-    with pytest.raises(Exception, match="Connection timeout"):
-        client.get_result("task_12345")
+    # 减少重试次数和等待时间以加速测试
+    with patch("core.asr_client.RETRY_CONFIG", {"max_attempts": 2, "min_wait": 0.1, "max_wait": 0.2}):
+        with pytest.raises(Exception):  # 重试后抛出的异常
+            client.get_result("task_12345")
+
+    # 验证重试机制生效（多次调用）
+    assert client._acs.do_action_with_exception.call_count >= 2
 
 
 def test_get_result_max_retries_one(asr_client_with_mock):
